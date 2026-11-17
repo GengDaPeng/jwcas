@@ -298,6 +298,12 @@ Official SDKs and framework integrations, by language:
 
 The complete list, including reverse proxies and third-party applications, is in the [Integrations](https://casdoor.ai/docs/category/integrations) documentation. Self-hosted apps with a one-click setup are on the [Casdoor Marketplace](https://marketplace.casdoor.com/apps/).
 
+## JWXT 自建版
+
+本节由 JWXT 项目新增。本地功能由自建版提供，官方市场的付费下载仍需要适用的厂商许可证。
+
+自建版关闭许可证自动上报、厂商发起的升级和集成市场的操作结果上报。上游版本查询和实例内升级默认关闭，管理员可以分别通过 `disableVersionCheck = false` 和 `disableUpgrade = false` 显式启用。请求追踪只会发送到部署配置中指定的 `otelEndpoint`。
+
 ## 🔒 Security
 
 **Please do not report security vulnerabilities in public GitHub issues.** Email <admin@casdoor.org> instead — [SECURITY.md](SECURITY.md) has the full policy and disclosure process.

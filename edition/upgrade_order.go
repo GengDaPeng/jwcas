@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by the JWXT project to accept only manually submitted upgrade orders.
+
 package edition
 
 import (
@@ -20,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -38,19 +39,6 @@ type UpgradeOrder struct {
 	Checksums  map[string]string `json:"checksums,omitempty"`
 	IssuedTime string            `json:"issuedTime"`
 	ExpireTime string            `json:"expireTime,omitempty"`
-}
-
-var (
-	orderMu      sync.RWMutex
-	pendingOrder *UpgradeOrder
-	orderHandler func(order *UpgradeOrder)
-)
-
-// SetUpgradeOrderHandler is called by the upgrade package, which starts an upgrade by itself when it may
-func SetUpgradeOrderHandler(handler func(order *UpgradeOrder)) {
-	orderMu.Lock()
-	orderHandler = handler
-	orderMu.Unlock()
 }
 
 // ParseUpgradeOrder verifies an upgrade order and checks that it is meant for this instance and its license
@@ -79,9 +67,7 @@ func ParseUpgradeOrder(text string) (*UpgradeOrder, error) {
 		}
 	}
 
-	stateMu.RLock()
-	license := current
-	stateMu.RUnlock()
+	license, _, _ := getState()
 	if license == nil || license.Id != order.License {
 		return nil, fmt.Errorf("the upgrade order is for the license %s, not the license of this Casdoor", order.License)
 	}
@@ -92,23 +78,4 @@ func ParseUpgradeOrder(text string) (*UpgradeOrder, error) {
 		return nil, fmt.Errorf("the upgrade order is for another Casdoor instance")
 	}
 	return order, nil
-}
-
-// GetUpgradeOrder returns the upgrade the license server asks for, if any
-func GetUpgradeOrder() *UpgradeOrder {
-	orderMu.RLock()
-	defer orderMu.RUnlock()
-	return pendingOrder
-}
-
-func setUpgradeOrder(order *UpgradeOrder) {
-	orderMu.Lock()
-	changed := (order == nil) != (pendingOrder == nil) || (order != nil && order.Id != pendingOrder.Id)
-	pendingOrder = order
-	handler := orderHandler
-	orderMu.Unlock()
-
-	if changed && order != nil && handler != nil {
-		handler(order)
-	}
 }
