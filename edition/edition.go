@@ -333,7 +333,10 @@ func CoversRelease(releaseTime string) bool {
 func Get() string {
 	license, _, _ := getState()
 	if license == nil {
-		return Community
+		// Modified by the JWXT project: this is a self-maintained build with no vendor
+		// license, and it must run as the enterprise edition. Every edition gate
+		// resolves through this function, so the whole gate surface follows from here.
+		return Enterprise
 	}
 	return license.Edition
 }
