@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by the JWXT project to separate local features from vendor licenses.
+
 package edition
 
 import (
@@ -135,18 +137,13 @@ type LicenseInfo struct {
 	// for a global admin: this instance's ID and the code to send for an offline activation
 	InstanceId     string `json:"instanceId,omitempty"`
 	ActivationCode string `json:"activationCode,omitempty"`
-	// for a global admin: the upgrade the license server asks for
-	UpgradeOrder *UpgradeOrder `json:"upgradeOrder,omitempty"`
 }
 
 var (
 	loadOnce    sync.Once
-	stateMu     sync.RWMutex
 	current     *License
 	currentErr  error
 	currentText string
-	// set when the license server says the license was revoked or is bound to another instance
-	rejectedErr error
 )
 
 func init() {
@@ -227,10 +224,9 @@ func load() {
 			currentText = strings.TrimSpace(text)
 		}
 		if currentErr != nil {
-			logs.Warn("license: %s, running as the %s edition", currentErr.Error(), Community)
+			logs.Warn("vendor license: %s", currentErr.Error())
 		} else {
-			logs.Info("license: %s edition licensed to %s, expires at %s", current.Edition, current.Licensee, current.ExpireTime)
-			go reportLoop()
+			logs.Info("vendor license: %s edition licensed to %s, expires at %s", current.Edition, current.Licensee, current.ExpireTime)
 		}
 	})
 }
@@ -238,16 +234,11 @@ func load() {
 // getState returns the license in effect, or nil with the reason it is not
 func getState() (*License, string, error) {
 	load()
-	stateMu.RLock()
-	defer stateMu.RUnlock()
 	if current == nil {
 		return nil, "", currentErr
 	}
 	if current.isExpired() && !current.coversBuild() {
 		return nil, "", current.getExpiredError()
-	}
-	if rejectedErr != nil {
-		return nil, "", rejectedErr
 	}
 	if current.InstanceId != "" {
 		instanceId := getInstanceId()
@@ -331,17 +322,16 @@ func CoversRelease(releaseTime string) bool {
 }
 
 func Get() string {
-	license, _, _ := getState()
-	if license == nil {
-		return Community
-	}
-	return license.Edition
+	// Keep the upstream edition value used by the console and feature checks.
+	return Enterprise
 }
 
-// GetLicenseText returns the configured license when it is valid and not expired, for the Marketplace to send
-// when downloading a paid integration
+// GetLicenseText returns the license of this build when it permits paid Marketplace downloads.
 func GetLicenseText() string {
-	_, text, _ := getState()
+	license, text, _ := getState()
+	if license == nil || ranks[license.Edition] < ranks[Commercial] {
+		return ""
+	}
 	return text
 }
 
@@ -391,8 +381,12 @@ func GetFeatures() []string {
 	return license.Features
 }
 
-// Allows tells whether the license gives the edition, or grants the feature on its own
+// Allows checks local features separately from vendor Marketplace entitlements.
 func Allows(edition string, feature string) bool {
+	if feature == FeaturePaidIntegrations {
+		license, _, _ := getState()
+		return license != nil && ranks[license.Edition] >= max(ranks[Commercial], ranks[edition])
+	}
 	if Has(edition) {
 		return true
 	}
@@ -418,12 +412,10 @@ func Require(edition string, feature string) error {
 
 func GetLicenseInfo() *LicenseInfo {
 	_, _, err := getState()
-	info := &LicenseInfo{Edition: Get(), Features: GetFeatures(), Kind: getKind(), InstanceId: getInstanceId(), ActivationCode: GetActivationCode(), UpgradeOrder: GetUpgradeOrder()}
+	info := &LicenseInfo{Edition: Get(), Features: GetFeatures(), Kind: getKind(), InstanceId: getInstanceId(), ActivationCode: GetActivationCode()}
 	if err != nil {
 		info.Error = err.Error()
 	}
-	stateMu.RLock()
-	defer stateMu.RUnlock()
 	if current != nil {
 		info.Id = current.Id
 		info.Licensee = current.Licensee

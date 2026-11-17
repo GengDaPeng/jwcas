@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by the JWXT project to disable upstream upgrades by default and remove vendor-triggered upgrades.
+
 package upgrade
 
 import (
@@ -97,7 +99,7 @@ type UpgradeInfo struct {
 	IsUpgradeDisabled bool           `json:"isUpgradeDisabled"`
 	CanUpgrade        bool           `json:"canUpgrade"`
 	Status            *UpgradeStatus `json:"status"`
-	// the upgrade the license server asks for, which starts by itself when allowVendorUpgrade is set in app.conf
+	// Kept in the response schema for existing consoles.
 	VendorOrder        *VendorOrder   `json:"vendorOrder"`
 	AllowVendorUpgrade bool           `json:"allowVendorUpgrade"`
 	AssetName          string         `json:"assetName"`
@@ -117,15 +119,11 @@ var (
 )
 
 func isCheckDisabled() bool {
-	return conf.GetConfigBool("disableVersionCheck")
+	return conf.GetConfigString("disableVersionCheck") != "false"
 }
 
 func isUpgradeDisabled() bool {
-	return conf.GetConfigBool("disableUpgrade") || conf.IsDemoMode()
-}
-
-func isVendorUpgradeAllowed() bool {
-	return conf.GetConfigBool("allowVendorUpgrade")
+	return conf.GetConfigString("disableUpgrade") != "false" || conf.IsDemoMode()
 }
 
 func isDocker() bool {
@@ -307,37 +305,17 @@ func isUpgrading(state string) bool {
 	return state == StateDownloading || state == StateInstalling || state == StateRestarting
 }
 
-func canInstallHere() bool {
-	return GetDeploymentType() == DeploymentRelease && !isUpgradeDisabled() && getAssetName() != ""
-}
-
-// isOrderPending tells whether an order still asks for a version other than the running one
-func isOrderPending(order *edition.UpgradeOrder) bool {
-	currentVersion, commitOffset := getCurrentVersion()
-	return order != nil && releaseTagRegex.MatchString(order.Version) && (order.Version != currentVersion || commitOffset > 0)
-}
-
 func GetUpgradeInfo() *UpgradeInfo {
 	currentVersion, commitOffset := getCurrentVersion()
 	info := &UpgradeInfo{
-		CurrentVersion:     currentVersion,
-		CommitOffset:       commitOffset,
-		DeploymentType:     GetDeploymentType(),
-		IsCheckDisabled:    isCheckDisabled(),
-		IsUpgradeDisabled:  isUpgradeDisabled(),
-		Status:             getStatus(),
-		AllowVendorUpgrade: isVendorUpgradeAllowed(),
-		AssetName:          getAssetName(),
-		LastResult:         GetLastResult(),
-	}
-	if order := edition.GetUpgradeOrder(); isOrderPending(order) {
-		info.VendorOrder = &VendorOrder{
-			Id:         order.Id,
-			Version:    order.Version,
-			Note:       order.Note,
-			IssuedTime: order.IssuedTime,
-			CanUpgrade: canInstallHere(),
-		}
+		CurrentVersion:    currentVersion,
+		CommitOffset:      commitOffset,
+		DeploymentType:    GetDeploymentType(),
+		IsCheckDisabled:   isCheckDisabled(),
+		IsUpgradeDisabled: isUpgradeDisabled(),
+		Status:            getStatus(),
+		AssetName:         getAssetName(),
+		LastResult:        GetLastResult(),
 	}
 	if info.IsCheckDisabled {
 		return info
@@ -359,23 +337,17 @@ func GetUpgradeInfo() *UpgradeInfo {
 	return info
 }
 
-// StartUpgrade installs version in the background, which must be the latest release or the one the license server
-// asks for; the progress is reported by GetUpgradeInfo()
+// StartUpgrade installs the latest release in the background. GetUpgradeInfo reports its progress.
 func StartUpgrade(version string, operator string) error {
-	order := edition.GetUpgradeOrder()
-	if isOrderPending(order) && version == order.Version {
-		return startOrderedUpgrade(order, "", operator)
-	}
-
 	info := GetUpgradeInfo()
 	if !info.CanUpgrade {
 		switch {
 		case info.DeploymentType != DeploymentRelease:
 			return fmt.Errorf("only an official release binary can upgrade itself, this Casdoor is deployed as: %s", info.DeploymentType)
 		case info.IsUpgradeDisabled:
-			return fmt.Errorf("upgrading is disabled by disableUpgrade in app.conf")
+			return fmt.Errorf("upgrading is disabled unless disableUpgrade is false")
 		case info.IsCheckDisabled:
-			return fmt.Errorf("checking the latest version is disabled by disableVersionCheck in app.conf")
+			return fmt.Errorf("checking the latest version is disabled unless disableVersionCheck is false")
 		case info.CheckError != "":
 			return fmt.Errorf("failed to check the latest version: %s", info.CheckError)
 		default:
@@ -400,7 +372,7 @@ func startOrderedUpgrade(order *edition.UpgradeOrder, archivePath string, operat
 	case GetDeploymentType() != DeploymentRelease:
 		return fmt.Errorf("only an official release binary can upgrade itself, this Casdoor is deployed as: %s", GetDeploymentType())
 	case isUpgradeDisabled():
-		return fmt.Errorf("upgrading is disabled by disableUpgrade in app.conf")
+		return fmt.Errorf("upgrading is disabled unless disableUpgrade is false")
 	case getAssetName() == "":
 		return fmt.Errorf("there is no release package for %s/%s", runtime.GOOS, runtime.GOARCH)
 	case !releaseTagRegex.MatchString(order.Version):
@@ -451,29 +423,6 @@ func InstallUploadedPackage(orderText string, archivePath string, operator strin
 		return err
 	}
 	return startOrderedUpgrade(order, archivePath, operator)
-}
-
-// onUpgradeOrder starts the upgrade a new order asks for when the admin let the vendor upgrade this instance
-func onUpgradeOrder(order *edition.UpgradeOrder) {
-	if !isVendorUpgradeAllowed() || !isOrderPending(order) || !canInstallHere() || isUpgrading(getStatus().State) {
-		return
-	}
-	err := startOrderedUpgrade(order, "", "the license server")
-	if err != nil {
-		logs.Warn("upgrade: failed to start the upgrade to %s that the license server asks for: %s", order.Version, err.Error())
-		setStatus(func(status *UpgradeStatus) {
-			if !isUpgrading(status.State) {
-				status.State = StateFailed
-				status.Version = order.Version
-				status.OrderId = order.Id
-				status.Error = err.Error()
-			}
-		})
-	}
-}
-
-func init() {
-	edition.SetUpgradeOrderHandler(onUpgradeOrder)
 }
 
 func runUpgrade(release *Release, checksum string, archivePath string, orderId string) {

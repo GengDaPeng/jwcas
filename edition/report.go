@@ -12,28 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by the JWXT project to keep license reports offline.
+
 package edition
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/beego/beego/v2/core/logs"
-	"github.com/casdoor/casdoor/conf"
 )
-
-const defaultLicenseServer = "https://admin.casdoor.com"
 
 // Reporter gives what a licensed Casdoor tells the license server about itself
 type Reporter struct {
@@ -127,31 +122,7 @@ func GetActivationCode() string {
 	return base64.RawURLEncoding.EncodeToString(data)
 }
 
-type reportResponse struct {
-	Status string `json:"status"`
-	Msg    string `json:"msg"`
-	Data   struct {
-		Status  string `json:"status"`
-		License string `json:"license"`
-		Message string `json:"message"`
-		Upgrade string `json:"upgrade"`
-	} `json:"data"`
-}
-
-// reportLoop tells the license server every hour that this instance runs the license, so that a license copied to
-// more instances than it allows shows up; it also picks up a renewed license and a revocation
-func reportLoop() {
-	time.Sleep(time.Minute)
-	for {
-		err := report()
-		if err != nil {
-			logs.Warn("license: failed to report to the license server: %s", err.Error())
-		}
-		time.Sleep(time.Hour)
-	}
-}
-
-func getReportBody(r *Reporter, text string, source string) map[string]interface{} {
+func getOfflineReportBody(r *Reporter, text string) map[string]interface{} {
 	hostname, _ := os.Hostname()
 	userCount := int64(0)
 	if r.UserCount != nil {
@@ -161,7 +132,7 @@ func getReportBody(r *Reporter, text string, source string) map[string]interface
 	if r.UpgradeState != nil {
 		upgradeState = r.UpgradeState()
 	}
-	res := map[string]interface{}{
+	return map[string]interface{}{
 		"license":     text,
 		"instanceId":  getInstanceId(),
 		"fingerprint": getFingerprint(),
@@ -171,12 +142,9 @@ func getReportBody(r *Reporter, text string, source string) map[string]interface
 		"userCount":   userCount,
 		"environment": collectEnvironment(),
 		"upgrade":     upgradeState,
+		"source":      "offline",
+		"time":        time.Now().Format(time.RFC3339),
 	}
-	if source != "" {
-		res["source"] = source
-		res["time"] = time.Now().Format(time.RFC3339)
-	}
-	return res
 }
 
 // GetOfflineReport is the report of an instance that cannot reach the license server, which a customer copies to the vendor
@@ -185,108 +153,13 @@ func GetOfflineReport() (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("the database is not ready")
 	}
-	stateMu.RLock()
-	text := currentText
-	stateMu.RUnlock()
+	_, text, _ := getState()
 	if text == "" {
 		return "", fmt.Errorf("no valid license is configured")
 	}
-	data, err := json.Marshal(getReportBody(r, text, "offline"))
+	data, err := json.Marshal(getOfflineReportBody(r, text))
 	if err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(data), nil
-}
-
-func report() error {
-	r := getReporter()
-	if r == nil {
-		return fmt.Errorf("the database is not ready")
-	}
-
-	stateMu.RLock()
-	text := currentText
-	license := current
-	stateMu.RUnlock()
-	if license == nil {
-		return nil
-	}
-
-	// the config item overrides the server in the license, e.g. "none" for an instance without Internet access
-	server := strings.TrimRight(conf.GetConfigString("licenseServer"), "/")
-	if server == "" {
-		server = strings.TrimRight(license.Server, "/")
-	}
-	if server == "" {
-		server = defaultLicenseServer
-	}
-	if server == "none" {
-		return nil
-	}
-
-	body, err := json.Marshal(getReportBody(r, text, ""))
-	if err != nil {
-		return err
-	}
-
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Post(server+"/api/report-license", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	res := &reportResponse{}
-	err = json.NewDecoder(resp.Body).Decode(res)
-	if err != nil {
-		return err
-	}
-	if res.Status != "ok" {
-		return fmt.Errorf("%s", res.Msg)
-	}
-
-	switch res.Data.Status {
-	case "Revoked", "Invalid":
-		message := res.Data.Message
-		if message == "" {
-			message = "the license was rejected by the license server"
-		}
-		stateMu.Lock()
-		if rejectedErr == nil {
-			logs.Warn("license: %s, running as the %s edition", message, Community)
-		}
-		rejectedErr = fmt.Errorf("%s", message)
-		stateMu.Unlock()
-	default:
-		stateMu.Lock()
-		if rejectedErr != nil {
-			logs.Info("license: the license server accepts the license again")
-		}
-		rejectedErr = nil
-		stateMu.Unlock()
-	}
-
-	if res.Data.Upgrade == "" {
-		setUpgradeOrder(nil)
-	} else if order, err := ParseUpgradeOrder(res.Data.Upgrade); err != nil {
-		logs.Warn("license: ignored the upgrade order from the license server: %s", err.Error())
-	} else {
-		setUpgradeOrder(order)
-	}
-
-	if res.Data.License != "" && strings.TrimSpace(res.Data.License) != text {
-		renewed, err := ParseLicense(res.Data.License)
-		if err != nil {
-			return fmt.Errorf("the renewed license from the license server is invalid: %s", err.Error())
-		}
-		if renewed.Id != license.Id {
-			return fmt.Errorf("the license server sent a license with another ID: %s", renewed.Id)
-		}
-		stateMu.Lock()
-		current = renewed
-		currentText = strings.TrimSpace(res.Data.License)
-		stateMu.Unlock()
-		logs.Info("license: renewed by the license server, %s edition licensed to %s, expires at %s", renewed.Edition, renewed.Licensee, renewed.ExpireTime)
-	}
-	return nil
 }

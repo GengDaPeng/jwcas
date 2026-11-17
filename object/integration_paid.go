@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by the JWXT project to separate paid downloads from local editions and remove outcome reporting.
+
 package object
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,7 +55,7 @@ func fetchMarketplaceFileWithLicense(fileUrl string, withLicense bool) ([]byte, 
 	if withLicense {
 		license := edition.GetLicenseText()
 		if license == "" {
-			return nil, edition.Require(edition.Commercial, edition.FeaturePaidIntegrations)
+			return nil, &edition.RequiredError{Edition: edition.Commercial, Feature: edition.FeaturePaidIntegrations}
 		}
 		req.Header.Set(licenseHeader, license)
 	}
@@ -129,29 +130,14 @@ func GetMarketplaceDownload(id string, path string) ([]byte, error) {
 		}
 	}
 
-	bundle, _, checkedVersion, err := getIntegrationBundle(item, "", true)
-	if err == nil {
-		err = fmt.Errorf("the integration: %s has no download %s", id, path)
-		for _, download := range bundle.Manifest.Downloads {
-			if download == path {
-				var data []byte
-				data, err = bundle.fetch(path)
-				if err == nil {
-					if checkedVersion != "" {
-						readMarketplaceVersionMetaStep(item.Id, checkedVersion, item.Edition != "", marketplaceStepInstalled, "")
-					}
-					return data, nil
-				}
-				break
-			}
+	bundle, _, err := getIntegrationBundle(item, "", true)
+	if err != nil {
+		return nil, err
+	}
+	for _, download := range bundle.Manifest.Downloads {
+		if download == path {
+			return bundle.fetch(path)
 		}
 	}
-	if checkedVersion != "" {
-		stage := installStageDownload
-		if errors.As(err, &integrationRevokedError{}) {
-			stage = installStageRevoked
-		}
-		readMarketplaceVersionMetaStep(item.Id, checkedVersion, item.Edition != "", marketplaceStepFailed, stage)
-	}
-	return nil, err
+	return nil, fmt.Errorf("the integration: %s has no download %s", id, path)
 }
